@@ -1,0 +1,48 @@
+services:
+  mysql:
+    image: mysql:8.0
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_PASSWORD}
+      MYSQL_DATABASE: ${MYSQL_DB}
+    ports:
+      - "3306:3306"
+    volumes:
+      - loanmysql:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  backend:
+    build: .
+    env_file:
+      - .env
+    depends_on:
+      mysql:
+        condition: service_healthy
+    ports:
+      - "5000:5000"
+    command: ["python", "backend/app.py"]
+    volumes:
+      - ./saved_models:/app/loan-risk-platform/saved_models
+      - ./reports:/app/loan-risk-platform/reports
+      - ./datasets:/app/loan-risk-platform/datasets
+
+  frontend:
+    build: .
+    env_file:
+      - .env
+    depends_on:
+      - backend
+    ports:
+      - "8501:8501"
+    command: ["streamlit", "run", "app.py", "--server.port=8501", "--server.address=0.0.0.0"]
+    volumes:
+      - ./saved_models:/app/loan-risk-platform/saved_models
+      - ./reports:/app/loan-risk-platform/reports
+      - ./datasets:/app/loan-risk-platform/datasets
+
+volumes:
+  loanmysql:
+

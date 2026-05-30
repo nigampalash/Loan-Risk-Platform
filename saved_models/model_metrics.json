@@ -1,0 +1,78 @@
+{
+  "best_model": "LogisticRegression",
+  "metrics_by_model": {
+    "LogisticRegression": {
+      "accuracy": 0.749,
+      "precision": 0.7732426303854876,
+      "recall": 0.9304229195088677,
+      "f1": 0.8445820433436533,
+      "roc_auc": 0.6813669134591311,
+      "confusion_matrix": [
+        [
+          67,
+          200
+        ],
+        [
+          51,
+          682
+        ]
+      ],
+      "approval_threshold": 0.5
+    },
+    "DecisionTree": {
+      "accuracy": 0.703,
+      "precision": 0.7639225181598063,
+      "recall": 0.8608458390177354,
+      "f1": 0.809493264913406,
+      "roc_auc": 0.5882423573534445,
+      "confusion_matrix": [
+        [
+          72,
+          195
+        ],
+        [
+          102,
+          631
+        ]
+      ],
+      "approval_threshold": 0.5
+    },
+    "RandomForest": {
+      "accuracy": 0.75,
+      "precision": 0.7710437710437711,
+      "recall": 0.937244201909959,
+      "f1": 0.8460591133004927,
+      "roc_auc": 0.6388220386181667,
+      "confusion_matrix": [
+        [
+          63,
+          204
+        ],
+        [
+          46,
+          687
+        ]
+      ],
+      "approval_threshold": 0.5
+    },
+    "XGBoost": {
+      "accuracy": 0.718,
+      "precision": 0.7625145518044237,
+      "recall": 0.8935879945429741,
+      "f1": 0.8228643216080402,
+      "roc_auc": 0.6322894471950988,
+      "confusion_matrix": [
+        [
+          63,
+          204
+        ],
+        [
+          78,
+          655
+        ]
+      ],
+      "approval_threshold": 0.5
+    }
+  },
+  "selection_best_auc": 0.6813669134591311
+}
