@@ -1,67 +1,84 @@
--- MySQL schema for Loan Approval Prediction & Risk Analytics Platform
+-- PostgreSQL schema for Loan Approval Prediction & Risk Analytics Platform
 
-CREATE DATABASE IF NOT EXISTS loananalytics CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
-USE loananalytics;
+-- Drop tables if they exist
+DROP TABLE IF EXISTS audit_logs CASCADE;
+DROP TABLE IF EXISTS model_metrics CASCADE;
+DROP TABLE IF EXISTS predictions CASCADE;
+DROP TABLE IF EXISTS borrowers CASCADE;
+DROP TABLE IF EXISTS users CASCADE;
 
-CREATE TABLE IF NOT EXISTS users (
-  id INT AUTO_INCREMENT PRIMARY KEY,
+-- Users Table
+CREATE TABLE users (
+  id SERIAL PRIMARY KEY,
   username VARCHAR(150) NOT NULL UNIQUE,
   password_hash VARCHAR(255) NOT NULL,
   is_active BOOLEAN NOT NULL DEFAULT TRUE,
-  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+  role VARCHAR(50) NOT NULL DEFAULT 'user',
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
-CREATE TABLE IF NOT EXISTS loan_applications (
-  id INT AUTO_INCREMENT PRIMARY KEY,
-  user_id INT NULL,
-  applicant_json VARCHAR(10000) NOT NULL,
-  loan_amount DOUBLE NULL,
-  loan_term INT NULL,
-  credit_history DOUBLE NULL,
-  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  INDEX idx_loan_app_user (user_id),
-  CONSTRAINT fk_loan_app_user
-    FOREIGN KEY (user_id) REFERENCES users(id)
-    ON DELETE SET NULL
+-- Borrowers Table (Applicant features)
+CREATE TABLE borrowers (
+  id SERIAL PRIMARY KEY,
+  user_id INT NULL REFERENCES users(id) ON DELETE SET NULL,
+  gender VARCHAR(20) NOT NULL,
+  age INT NOT NULL,
+  married VARCHAR(10) NOT NULL,
+  dependents INT NOT NULL,
+  education VARCHAR(50) NOT NULL,
+  employment_type VARCHAR(50) NOT NULL,
+  monthly_income DOUBLE PRECISION NOT NULL,
+  coapplicant_income DOUBLE PRECISION NOT NULL,
+  loan_amount DOUBLE PRECISION NOT NULL,
+  loan_term INT NOT NULL,
+  credit_history DOUBLE PRECISION NOT NULL,
+  existing_debt DOUBLE PRECISION NOT NULL,
+  property_area VARCHAR(50) NOT NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
-CREATE TABLE IF NOT EXISTS predictions (
-  id INT AUTO_INCREMENT PRIMARY KEY,
-  loan_application_id INT NOT NULL,
-  approval_probability DOUBLE NOT NULL,
-  approval_status VARCHAR(10) NOT NULL,
-  model_name VARCHAR(100) NOT NULL,
-  approval_threshold DOUBLE NOT NULL,
-  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  INDEX idx_pred_loan_app (loan_application_id),
-  CONSTRAINT fk_pred_loan_app
-    FOREIGN KEY (loan_application_id) REFERENCES loan_applications(id)
-    ON DELETE CASCADE
-);
-
-CREATE TABLE IF NOT EXISTS risk_scores (
-  id INT AUTO_INCREMENT PRIMARY KEY,
-  prediction_id INT NOT NULL,
-  risk_score DOUBLE NOT NULL,
-  risk_category VARCHAR(20) NOT NULL,
+-- Predictions Table
+CREATE TABLE predictions (
+  id SERIAL PRIMARY KEY,
+  borrower_id INT NOT NULL REFERENCES borrowers(id) ON DELETE CASCADE,
+  user_id INT NULL REFERENCES users(id) ON DELETE SET NULL,
+  approval_probability DOUBLE PRECISION NOT NULL,
+  approval_status VARCHAR(20) NOT NULL,
+  approval_threshold DOUBLE PRECISION NOT NULL,
+  risk_score DOUBLE PRECISION NOT NULL,
+  risk_category VARCHAR(50) NOT NULL,
   shap_summary_path VARCHAR(500) NULL,
   shap_importance_path VARCHAR(500) NULL,
-  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  INDEX idx_risk_pred (prediction_id),
-  CONSTRAINT fk_risk_pred
-    FOREIGN KEY (prediction_id) REFERENCES predictions(id)
-    ON DELETE CASCADE
+  pdf_report_path VARCHAR(500) NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
-CREATE TABLE IF NOT EXISTS logs (
-  id INT AUTO_INCREMENT PRIMARY KEY,
-  user_id INT NULL,
-  level VARCHAR(20) NOT NULL DEFAULT 'INFO',
-  message VARCHAR(10000) NOT NULL,
-  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  INDEX idx_logs_user (user_id),
-  CONSTRAINT fk_logs_user
-    FOREIGN KEY (user_id) REFERENCES users(id)
-    ON DELETE SET NULL
+-- Model Metrics Table
+CREATE TABLE model_metrics (
+  id SERIAL PRIMARY KEY,
+  model_name VARCHAR(100) NOT NULL,
+  accuracy DOUBLE PRECISION NOT NULL,
+  precision DOUBLE PRECISION NOT NULL,
+  recall DOUBLE PRECISION NOT NULL,
+  f1_score DOUBLE PRECISION NOT NULL,
+  roc_auc DOUBLE PRECISION NOT NULL,
+  confusion_matrix TEXT NOT NULL, -- JSON formatted array
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
+-- Audit Logs Table
+CREATE TABLE audit_logs (
+  id SERIAL PRIMARY KEY,
+  user_id INT NULL REFERENCES users(id) ON DELETE SET NULL,
+  action VARCHAR(100) NOT NULL,
+  status VARCHAR(50) NOT NULL,
+  ip_address VARCHAR(45) NULL,
+  details TEXT NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Indexes for query optimization
+CREATE INDEX idx_borrowers_user ON borrowers(user_id);
+CREATE INDEX idx_predictions_borrower ON predictions(borrower_id);
+CREATE INDEX idx_predictions_user ON predictions(user_id);
+CREATE INDEX idx_audit_logs_user ON audit_logs(user_id);

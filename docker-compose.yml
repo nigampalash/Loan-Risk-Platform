@@ -1,48 +1,41 @@
+version: '3.8'
+
 services:
-  mysql:
-    image: mysql:8.0
+  db:
+    image: postgres:15-alpine
+    container_name: loanrisk-db
     environment:
-      MYSQL_ROOT_PASSWORD: ${MYSQL_PASSWORD}
-      MYSQL_DATABASE: ${MYSQL_DB}
+      POSTGRES_USER: ${DB_USER:-postgres}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-postgrespassword}
+      POSTGRES_DB: ${DB_NAME:-loananalytics}
     ports:
-      - "3306:3306"
+      - "5432:5432"
     volumes:
-      - loanmysql:/var/lib/mysql
+      - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
       interval: 5s
       timeout: 5s
-      retries: 20
+      retries: 10
 
-  backend:
-    build: .
-    env_file:
-      - .env
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: loanrisk-app
+    environment:
+      - DATABASE_URL=postgresql://${DB_USER:-postgres}:${DB_PASSWORD:-postgrespassword}@db:5432/${DB_NAME:-loananalytics}
+      - JWT_SECRET=${JWT_SECRET:-super-secret-key-change-in-production}
+      - DATASET_ROWS=5000
+      - DATASET_MODE=synthetic
     depends_on:
-      mysql:
+      db:
         condition: service_healthy
     ports:
       - "5000:5000"
-    command: ["python", "backend/app.py"]
     volumes:
-      - ./saved_models:/app/loan-risk-platform/saved_models
-      - ./reports:/app/loan-risk-platform/reports
-      - ./datasets:/app/loan-risk-platform/datasets
-
-  frontend:
-    build: .
-    env_file:
-      - .env
-    depends_on:
-      - backend
-    ports:
-      - "8501:8501"
-    command: ["streamlit", "run", "app.py", "--server.port=8501", "--server.address=0.0.0.0"]
-    volumes:
-      - ./saved_models:/app/loan-risk-platform/saved_models
-      - ./reports:/app/loan-risk-platform/reports
-      - ./datasets:/app/loan-risk-platform/datasets
+      - ./saved_models:/app/saved_models
+      - ./reports:/app/reports
 
 volumes:
-  loanmysql:
-
+  postgres_data:

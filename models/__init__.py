@@ -1,16 +1,15 @@
 from .base import Base
 from .user import User
-from .loan_application import LoanApplication
+from .borrower import Borrower
 from .prediction import Prediction
-from .risk_score import RiskScore
-from .log import Log
+from .model_metric import ModelMetric
+from .audit_log import AuditLog
 
 __all__ = [
     "Base",
     "User",
-    "LoanApplication",
+    "Borrower",
     "Prediction",
-    "RiskScore",
-    "Log",
+    "ModelMetric",
+    "AuditLog",
 ]
-

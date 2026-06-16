@@ -19,13 +19,11 @@ from sklearn.metrics import (
 )
 
 from sklearn.linear_model import LogisticRegression
-from sklearn.tree import DecisionTreeClassifier
 from sklearn.ensemble import RandomForestClassifier
-
 from xgboost import XGBClassifier
+from lightgbm import LGBMClassifier
 
 from backend.ml.data import load_or_generate_dataset
-from backend.risk.scoring import risk_from_probability
 
 
 def _model_dir() -> str:
@@ -70,8 +68,7 @@ def train_pipeline():
     )
 
     models = {
-        "LogisticRegression": LogisticRegression(max_iter=2000),
-        "DecisionTree": DecisionTreeClassifier(max_depth=10, random_state=42),
+        "LogisticRegression": LogisticRegression(max_iter=2000, random_state=42),
         "RandomForest": RandomForestClassifier(n_estimators=300, random_state=42),
         "XGBoost": XGBClassifier(
             n_estimators=500,
@@ -81,6 +78,14 @@ def train_pipeline():
             colsample_bytree=0.9,
             eval_metric="logloss",
             random_state=42,
+        ),
+        "LightGBM": LGBMClassifier(
+            n_estimators=500,
+            learning_rate=0.05,
+            max_depth=5,
+            subsample=0.9,
+            random_state=42,
+            verbose=-1,
         ),
     }
 
@@ -92,14 +97,15 @@ def train_pipeline():
     best_name = None
     best_auc = -1.0
     best_pipeline = None
-    best_threshold = 0.5
+    approval_threshold = 0.5
 
     for name, clf in models.items():
         pipe = Pipeline(steps=[("preprocessor", preprocessor), ("classifier", clf)])
         pipe.fit(X_train, y_train)
 
+        # Predict probabilities
         proba = pipe.predict_proba(X_test)[:, 1]
-        pred = (proba >= best_threshold).astype(int)
+        pred = (proba >= approval_threshold).astype(int)
 
         metrics = {
             "accuracy": float(accuracy_score(y_test, pred)),
@@ -108,7 +114,7 @@ def train_pipeline():
             "f1": float(f1_score(y_test, pred, zero_division=0)),
             "roc_auc": float(roc_auc_score(y_test, proba)),
             "confusion_matrix": confusion_matrix(y_test, pred).tolist(),
-            "approval_threshold": best_threshold,
+            "approval_threshold": approval_threshold,
         }
 
         metrics_by_model[name] = metrics
@@ -118,24 +124,65 @@ def train_pipeline():
             best_name = name
             best_pipeline = pipe
 
-    # Persist best model
+    # Save best model
     bundle = {
         "model_name": best_name,
         "pipeline": best_pipeline,
         "feature_names": feature_names,
-        "approval_threshold": best_threshold,
+        "approval_threshold": approval_threshold,
     }
 
     best_model_path = os.path.join(_model_dir(), "best_model.pkl")
     joblib.dump(bundle, best_model_path)
 
-    # Persist metrics
-    with open(os.path.join(_model_dir(), "model_metrics.json"), "w", encoding="utf-8") as f:
-        json.dump({"best_model": best_name, "metrics_by_model": metrics_by_model, "selection_best_auc": best_auc}, f, indent=2)
+    # Save metrics
+    metrics_path = os.path.join(_model_dir(), "model_metrics.json")
+    with open(metrics_path, "w", encoding="utf-8") as f:
+        json.dump(
+            {
+                "best_model": best_name,
+                "metrics_by_model": metrics_by_model,
+                "selection_best_auc": best_auc,
+            },
+            f,
+            indent=2,
+        )
 
-    # Persist feature names for UI
-    with open(os.path.join(_model_dir(), "feature_names.json"), "w", encoding="utf-8") as f:
+    # Save feature names
+    feature_path = os.path.join(_model_dir(), "feature_names.json")
+    with open(feature_path, "w", encoding="utf-8") as f:
         json.dump(feature_names, f, indent=2)
 
     print(f"Training complete. Best model: {best_name} (ROC AUC={best_auc:.4f})")
 
+    # Optionally sync with DB if DB is active and running
+    try:
+        from backend.database import get_engine
+        from sqlalchemy import text
+        engine = get_engine()
+        with engine.begin() as conn:
+            # Clear old metrics and save new ones
+            conn.execute(text("DELETE FROM model_metrics"))
+            for m_name, m_val in metrics_by_model.items():
+                conn.execute(
+                    text(
+                        "INSERT INTO model_metrics (model_name, accuracy, precision, recall, f1_score, roc_auc, confusion_matrix) "
+                        "VALUES (:name, :acc, :prec, :rec, :f1, :auc, :cm)"
+                    ),
+                    {
+                        "name": m_name,
+                        "acc": m_val["accuracy"],
+                        "prec": m_val["precision"],
+                        "rec": m_val["recall"],
+                        "f1": m_val["f1"],
+                        "auc": m_val["roc_auc"],
+                        "cm": json.dumps(m_val["confusion_matrix"]),
+                    },
+                )
+            print("Successfully synced metrics to model_metrics database table.")
+    except Exception as e:
+        print(f"Could not sync metrics to database (DB might be offline/sqlite fallback pending): {e}")
+
+
+if __name__ == "__main__":
+    train_pipeline()

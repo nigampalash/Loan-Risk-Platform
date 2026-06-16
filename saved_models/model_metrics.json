@@ -19,24 +19,6 @@
       ],
       "approval_threshold": 0.5
     },
-    "DecisionTree": {
-      "accuracy": 0.703,
-      "precision": 0.7639225181598063,
-      "recall": 0.8608458390177354,
-      "f1": 0.809493264913406,
-      "roc_auc": 0.5882423573534445,
-      "confusion_matrix": [
-        [
-          72,
-          195
-        ],
-        [
-          102,
-          631
-        ]
-      ],
-      "approval_threshold": 0.5
-    },
     "RandomForest": {
       "accuracy": 0.75,
       "precision": 0.7710437710437711,
@@ -69,6 +51,24 @@
         [
           78,
           655
+        ]
+      ],
+      "approval_threshold": 0.5
+    },
+    "LightGBM": {
+      "accuracy": 0.716,
+      "precision": 0.7619603267211202,
+      "recall": 0.8908594815825375,
+      "f1": 0.8213836477987422,
+      "roc_auc": 0.6245637700486943,
+      "confusion_matrix": [
+        [
+          63,
+          204
+        ],
+        [
+          80,
+          653
         ]
       ],
       "approval_threshold": 0.5

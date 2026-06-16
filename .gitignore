@@ -1,0 +1,32 @@
+# Virtual environment
+venv/
+.venv/
+ENV/
+
+# Python cache and compiled files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Local databases
+*.db
+*.sqlite
+
+# Local secrets & configs
+.env
+
+# Generated reports & models (keep folder structure but ignore run assets)
+reports/*.pdf
+reports/*.png
+saved_models/*.pkl
+saved_models/*.json
+
+# Node modules & builds
+node_modules/
+dist/
+.eslintcache
+.DS_Store

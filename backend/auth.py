@@ -1,106 +1,118 @@
 import os
 import time
 import bcrypt
+import jwt
+from typing import Any, Optional
 from dotenv import load_dotenv
-from typing import Any
-
-from backend.database import get_engine
 from sqlalchemy import text
+from sqlalchemy.orm import Session
+
+from backend.database import SessionLocal
+from models.user import User
+from models.borrower import Borrower
+from models.prediction import Prediction
+from models.audit_log import AuditLog
+
+load_dotenv()
 
 
 class AuthService:
-    """Simple token-based auth (no external JWT dependency).
-
-    Token format:
-      base64(user_id:expiry:random)
-
-    For a demo/final-year project, we store sessions in DB logs only.
-    """
+    """Production-grade JWT authentication and user session persistence service."""
 
     def __init__(self):
-        load_dotenv()
-        self.secret = os.getenv("FLASK_SECRET_KEY", "dev_secret")
+        self.secret = os.getenv("JWT_SECRET", os.getenv("FLASK_SECRET_KEY", "dev_secret"))
+        self.algorithm = os.getenv("JWT_ALGORITHM", "HS256")
+        self.token_expiry = int(os.getenv("TOKEN_EXPIRY_SECONDS", "36000"))
 
-    def _hash(self, password: str) -> str:
+    def hash_password(self, password: str) -> str:
         salt = bcrypt.gensalt()
         return bcrypt.hashpw(password.encode("utf-8"), salt).decode("utf-8")
 
-    def _verify(self, password: str, password_hash: str) -> bool:
-        return bcrypt.checkpw(password.encode("utf-8"), password_hash.encode("utf-8"))
-
-    def register(self, username: str, password: str) -> None:
-        if len(username) < 3:
-            raise ValueError("username must be at least 3 chars")
-        if len(password) < 6:
-            raise ValueError("password must be at least 6 chars")
-
-        engine = get_engine()
-        with engine.begin() as conn:
-            existing = conn.execute(text("SELECT id FROM users WHERE username=:u"), {"u": username}).fetchone()
-            if existing:
-                raise ValueError("username already exists")
-
-            password_hash = self._hash(password)
-            conn.execute(
-                text("INSERT INTO users (username, password_hash, is_active) VALUES (:u, :ph, 1)"),
-                {"u": username, "ph": password_hash},
-            )
-
-    def login(self, username: str, password: str) -> str:
-        engine = get_engine()
-        with engine.begin() as conn:
-            row = conn.execute(
-                text("SELECT id, password_hash, is_active FROM users WHERE username=:u"),
-                {"u": username},
-            ).fetchone()
-
-        if not row:
-            raise PermissionError("invalid credentials")
-
-        user_id, password_hash, is_active = row
-        if not is_active:
-            raise PermissionError("user is inactive")
-
-        if not self._verify(password, password_hash):
-            raise PermissionError("invalid credentials")
-
-        # Token is simplistic: store in-memory-like signature with expiry.
-        expiry_seconds = int(os.getenv("TOKEN_EXPIRY_SECONDS", "36000"))
-        expiry = int(time.time()) + expiry_seconds
-        token = f"{user_id}:{expiry}:{self.secret}"
-        # base64 for URL safety
-        import base64
-
-        return base64.urlsafe_b64encode(token.encode("utf-8")).decode("utf-8")
-
-    def verify_token(self, token: str) -> dict[str, Any]:
-        import base64
-
+    def verify_password(self, password: str, password_hash: str) -> bool:
         try:
-            raw = base64.urlsafe_b64decode(token.encode("utf-8")).decode("utf-8")
-            user_id_s, expiry_s, signature = raw.split(":", 2)
-            if signature != self.secret:
-                return None  # type: ignore[return-value]
-            if int(time.time()) > int(expiry_s):
-                return None  # type: ignore[return-value]
-            user_id = int(user_id_s)
+            return bcrypt.checkpw(password.encode("utf-8"), password_hash.encode("utf-8"))
         except Exception:
-            return None  # type: ignore[return-value]
+            return False
 
-        engine = get_engine()
-        with engine.begin() as conn:
-            row = conn.execute(
-                text("SELECT id, username, is_active FROM users WHERE id=:id"),
-                {"id": user_id},
-            ).fetchone()
+    def register(self, db: Session, username: str, password: str) -> User:
+        if len(username) < 3:
+            raise ValueError("Username must be at least 3 characters")
+        if len(password) < 6:
+            raise ValueError("Password must be at least 6 characters")
 
-        if not row or not row[2]:
-            return None  # type: ignore[return-value]
+        existing = db.query(User).filter(User.username == username).first()
+        if existing:
+            raise ValueError("Username already exists")
 
-        return {"id": row[0], "username": row[1]}
+        hashed_pw = self.hash_password(password)
+        # Determine role (make first registered user admin for system access)
+        role = "admin" if db.query(User).count() == 0 else "user"
+
+        new_user = User(
+            username=username,
+            password_hash=hashed_pw,
+            is_active=True,
+            role=role
+        )
+        db.add(new_user)
+        db.commit()
+        db.refresh(new_user)
+
+        # Log audit trail
+        self.log_event(db, user_id=new_user.id, action="USER_REGISTRATION", status="SUCCESS", details=f"User {username} registered successfully.")
+
+        return new_user
+
+    def login(self, db: Session, username: str, password: str, ip_address: Optional[str] = None) -> str:
+        user = db.query(User).filter(User.username == username).first()
+
+        if not user:
+            self.log_event(db, user_id=None, action="USER_LOGIN", status="FAILURE", ip_address=ip_address, details=f"Login attempt failed for non-existent username: {username}")
+            raise PermissionError("Invalid username or password")
+
+        if not user.is_active:
+            self.log_event(db, user_id=user.id, action="USER_LOGIN", status="FAILURE", ip_address=ip_address, details=f"Inactive user {username} attempted login")
+            raise PermissionError("User account is disabled")
+
+        if not self.verify_password(password, user.password_hash):
+            self.log_event(db, user_id=user.id, action="USER_LOGIN", status="FAILURE", ip_address=ip_address, details=f"Login attempt failed (incorrect password) for username: {username}")
+            raise PermissionError("Invalid username or password")
+
+        # Create JWT payload
+        payload = {
+            "sub": str(user.id),
+            "username": user.username,
+            "role": user.role,
+            "exp": int(time.time()) + self.token_expiry,
+            "iat": int(time.time())
+        }
+
+        token = jwt.encode(payload, self.secret, algorithm=self.algorithm)
+        self.log_event(db, user_id=user.id, action="USER_LOGIN", status="SUCCESS", ip_address=ip_address, details=f"User {username} logged in successfully")
+        return token
+
+    def verify_token(self, db: Session, token: str) -> Optional[dict[str, Any]]:
+        try:
+            payload = jwt.decode(token, self.secret, algorithms=[self.algorithm])
+            user_id = int(payload.get("sub", 0))
+            if not user_id:
+                return None
+
+            user = db.query(User).filter(User.id == user_id).first()
+            if not user or not user.is_active:
+                return None
+
+            return {
+                "id": user.id,
+                "username": user.username,
+                "role": user.role
+            }
+        except (jwt.ExpiredSignatureError, jwt.InvalidTokenError):
+            return None
 
     def persist_prediction(
         self,
+        db: Session,
         user_id: int,
         applicant_json: dict[str, Any],
         approval_probability: float,
@@ -109,63 +121,78 @@ class AuthService:
         approval_threshold: float,
         risk_score: float,
         risk_category: str,
-        shap_summary_path: str | None,
-        shap_importance_path: str | None,
-    ) -> dict[str, Any]:
-        import json
+        shap_summary_path: Optional[str] = None,
+        shap_importance_path: Optional[str] = None,
+        pdf_report_path: Optional[str] = None,
+    ) -> Prediction:
+        # Create and persist Borrower profile
+        borrower = Borrower(
+            user_id=user_id,
+            gender=applicant_json.get("Gender", "Unknown"),
+            age=int(applicant_json.get("Age", 0)),
+            married=applicant_json.get("Married", "No"),
+            dependents=int(applicant_json.get("Dependents", 0)),
+            education=applicant_json.get("Education", "Graduate"),
+            employment_type=applicant_json.get("Employment Type", "Salaried"),
+            monthly_income=float(applicant_json.get("Monthly Income", 0.0)),
+            coapplicant_income=float(applicant_json.get("CoApplicant Income", 0.0)),
+            loan_amount=float(applicant_json.get("Loan Amount", 0.0)),
+            loan_term=int(applicant_json.get("Loan Term", 360)),
+            credit_history=float(applicant_json.get("Credit History", 1.0)),
+            existing_debt=float(applicant_json.get("Existing Debt", 0.0)),
+            property_area=applicant_json.get("Property Area", "Urban")
+        )
 
-        engine = get_engine()
-        loan_amount = applicant_json.get("Loan Amount")
-        loan_term = applicant_json.get("Loan Term")
-        credit_history = applicant_json.get("Credit History")
+        db.add(borrower)
+        db.commit()
+        db.refresh(borrower)
 
-        with engine.begin() as conn:
-            res1 = conn.execute(
-                text(
-                    "INSERT INTO loan_applications (user_id, applicant_json, loan_amount, loan_term, credit_history) "
-                    "VALUES (:uid, :aj, :la, :lt, :ch)"
-                ),
-                {
-                    "uid": user_id,
-                    "aj": json.dumps(applicant_json),
-                    "la": loan_amount,
-                    "lt": loan_term,
-                    "ch": credit_history,
-                },
-            )
-            loan_app_id = res1.lastrowid
+        # Create and persist Prediction linked to the Borrower
+        prediction = Prediction(
+            borrower_id=borrower.id,
+            user_id=user_id,
+            approval_probability=approval_probability,
+            approval_status=approval_status,
+            approval_threshold=approval_threshold,
+            risk_score=risk_score,
+            risk_category=risk_category,
+            shap_summary_path=shap_summary_path,
+            shap_importance_path=shap_importance_path,
+            pdf_report_path=pdf_report_path
+        )
 
-            res2 = conn.execute(
-                text(
-                    "INSERT INTO predictions (loan_application_id, approval_probability, approval_status, model_name, approval_threshold) "
-                    "VALUES (:lid, :ap, :as, :mn, :th)"
-                ),
-                {
-                    "lid": loan_app_id,
-                    "ap": approval_probability,
-                    "as": approval_status,
-                    "mn": model_name,
-                    "th": approval_threshold,
-                },
-            )
-            prediction_id = res2.lastrowid
+        db.add(prediction)
+        db.commit()
+        db.refresh(prediction)
 
-            res3 = conn.execute(
-                text(
-                    "INSERT INTO risk_scores (prediction_id, risk_score, risk_category, shap_summary_path, shap_importance_path) "
-                    "VALUES (:pid, :rs, :rc, :ss, :si)"
-                ),
-                {
-                    "pid": prediction_id,
-                    "rs": risk_score,
-                    "rc": risk_category,
-                    "ss": shap_summary_path,
-                    "si": shap_importance_path,
-                },
-            )
+        # Log event
+        self.log_event(
+            db,
+            user_id=user_id,
+            action="LOAN_PREDICTION",
+            status="SUCCESS",
+            details=f"Prediction generated for Borrower ID {borrower.id}: {approval_status.upper()} (Risk Score: {risk_score:.1f}, Category: {risk_category})"
+        )
 
-        return {
-            "loan_application_id": loan_app_id,
-            "prediction_id": prediction_id,
-        }
+        return prediction
 
+    def log_event(
+        self,
+        db: Session,
+        user_id: Optional[int],
+        action: str,
+        status: str,
+        ip_address: Optional[str] = None,
+        details: Optional[str] = None
+    ) -> AuditLog:
+        log = AuditLog(
+            user_id=user_id,
+            action=action,
+            status=status,
+            ip_address=ip_address,
+            details=details
+        )
+        db.add(log)
+        db.commit()
+        db.refresh(log)
+        return log

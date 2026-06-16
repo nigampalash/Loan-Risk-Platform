@@ -2,7 +2,7 @@ import os
 import json
 import joblib
 import numpy as np
-
+import pandas as pd
 import shap
 import matplotlib
 
@@ -11,7 +11,6 @@ import matplotlib.pyplot as plt
 
 from backend.risk.scoring import risk_from_probability
 from backend.storage.artifacts import load_model_bundle, model_path
-
 
 _MODEL_BUNDLE = None
 
@@ -32,31 +31,8 @@ def ensure_model_loaded():
         return
     if not os.path.exists(model_path()):
         from backend.ml.train import train_pipeline
-
         train_pipeline()
     _MODEL_BUNDLE = load_model_bundle()
-
-
-def _build_explainer(pipeline, X_background):
-    # Use model's predicted probabilities.
-    # For linear/logistic we could use LinearExplainer, but for generic we use KernelExplainer fallback.
-    # However KernelExplainer is too slow. Prefer TreeExplainer when possible.
-    classifier = pipeline.named_steps.get("classifier")
-    pre = pipeline.named_steps.get("preprocessor")
-
-    X_bg = pre.transform(X_background)
-
-    try:
-        if "XGB" in classifier.__class__.__name__ or hasattr(classifier, "predict_proba"):
-            explainer = shap.TreeExplainer(classifier)
-            return explainer, pre
-    except Exception:
-        pass
-
-    # Fallback to shap.Explainer with model wrapper
-    f = lambda X: classifier.predict_proba(X)[:, 1]
-    explainer = shap.Explainer(f, X_bg)
-    return explainer, pre
 
 
 def predict_one_with_shap(applicant: dict):
@@ -64,91 +40,126 @@ def predict_one_with_shap(applicant: dict):
     bundle = _MODEL_BUNDLE
     pipeline = bundle["pipeline"]
 
-    # Keep feature order by building df
-    import pandas as pd
-
+    # Build single-row DataFrame for inference
     X = pd.DataFrame([applicant])
 
-    proba = pipeline.predict_proba(X)[:, 1][0]
+    # Predict approval probability
+    proba = float(pipeline.predict_proba(X)[:, 1][0])
     risk_score, risk_category = risk_from_probability(proba)
 
     approval_threshold = float(bundle.get("approval_threshold", 0.5))
     approval_status = "approved" if proba >= approval_threshold else "rejected"
 
-    # SHAP artifacts: compute explainer on small background sample.
-    # For speed, generate background from synthetic split from saved dataset.
     reports_dir = _reports_dir()
     os.makedirs(reports_dir, exist_ok=True)
 
-    background_path = os.path.join(os.path.dirname(_model_dir()), os.getenv("DATA_DIR", "datasets"), "loan_synthetic.csv")
+    # Load background dataset for SHAP if available
+    background_path = os.path.join(
+        os.path.dirname(_model_dir()),
+        os.getenv("DATA_DIR", "datasets"),
+        "loan_synthetic.csv"
+    )
     try:
         df_bg = pd.read_csv(background_path)
-        X_bg = df_bg.drop(columns=[c for c in df_bg.columns if c.lower() == "loan_status" or c.lower() == "loan status"], errors="ignore").head(200)
+        X_bg = df_bg.drop(
+            columns=[c for c in df_bg.columns if c.lower() in ("loan_status", "loan status")],
+            errors="ignore"
+        ).head(100)
     except Exception:
         X_bg = pd.DataFrame([applicant])
 
     shap_artifacts = {}
+    feature_importance = []
+
     try:
-        # Preprocess for shap
+        classifier = pipeline.named_steps["preprocessor"]  # wait, preprocessor is first
         classifier = pipeline.named_steps["classifier"]
         preprocessor = pipeline.named_steps["preprocessor"]
 
+        # Transform data to match classifier input shape
         X_bg_trans = preprocessor.transform(X_bg)
         X_trans = preprocessor.transform(X)
 
-        # TreeExplainer for tree-based estimators
-        if classifier.__class__.__name__.lower().find("xgb") >= 0 or classifier.__class__.__name__.lower().find("randomforest") >= 0 or classifier.__class__.__name__.lower().find("decisiontree") >= 0:
+        # Convert to dense if sparse (e.g. from OneHotEncoder)
+        if hasattr(X_trans, "toarray"):
+            X_trans = X_trans.toarray()
+            X_bg_trans = X_bg_trans.toarray() if hasattr(X_bg_trans, "toarray") else X_bg_trans
+
+        # Determine feature names after preprocessing
+        try:
+            feature_names_out = preprocessor.get_feature_names_out().tolist()
+        except Exception:
+            feature_names_out = [f"f{i}" for i in range(X_trans.shape[1])]
+
+        clf_name = classifier.__class__.__name__.lower()
+        explainer = None
+
+        # Build explainer based on classifier type
+        if "xgb" in clf_name or "randomforest" in clf_name or "decisiontree" in clf_name or "lgbm" in clf_name or "lightgbm" in clf_name:
             explainer = shap.TreeExplainer(classifier)
+            # TreeExplainer returns list for multiclass or 2D array for binary.
+            # Handle array structure.
             shap_values = explainer.shap_values(X_trans)
-
-            # Summary plot
-            summary_path = os.path.join(reports_dir, f"shap_summary_{int(np.random.randint(1e9))}.png")
-            shap.summary_plot(shap_values, features=X_trans, show=False)
-            plt.tight_layout()
-            plt.savefig(summary_path, dpi=200, bbox_inches="tight")
-            plt.close()
-
-            # Bar/importance plot
-            importance_path = os.path.join(reports_dir, f"shap_importance_{int(np.random.randint(1e9))}.png")
-            shap.summary_plot(shap_values, features=X_trans, plot_type="bar", show=False)
-            plt.tight_layout()
-            plt.savefig(importance_path, dpi=200, bbox_inches="tight")
-            plt.close()
-
-            shap_artifacts["shap_summary_path"] = summary_path
-            shap_artifacts["shap_importance_path"] = importance_path
-
-            # Individual explanation: top features by absolute shap
-            sv = shap_values
-            if isinstance(sv, list):
-                sv = sv[0]
-            abs_vals = np.abs(sv[0])
-            top_idx = np.argsort(-abs_vals)[:6]
-            feature_importance = []
-
-            try:
-                feature_names_out = preprocessor.get_feature_names_out().tolist()
-            except Exception:
-                feature_names_out = [f"f{i}" for i in range(len(abs_vals))]
-
-            for i in top_idx:
-                feature_importance.append(
-                    {
-                        "feature": feature_names_out[i],
-                        "shap_value": float(sv[0][i]),
-                        "direction": "increases approval" if sv[0][i] > 0 else "decreases approval",
-                    }
-                )
-
+            if isinstance(shap_values, list):
+                # For binary classification, index 1 corresponds to class 1 (approved/positive class)
+                sv = shap_values[1] if len(shap_values) > 1 else shap_values[0]
+            else:
+                # If 3D (e.g. multiclass/binary with dimensions) or 2D
+                if len(shap_values.shape) == 3:
+                    sv = shap_values[:, :, 1]
+                else:
+                    sv = shap_values
+        elif "logistic" in clf_name:
+            explainer = shap.LinearExplainer(classifier, X_bg_trans)
+            sv = explainer.shap_values(X_trans)
         else:
-            shap_artifacts["shap_summary_path"] = None
-            shap_artifacts["shap_importance_path"] = None
-            feature_importance = []
+            # Fallback
+            explainer = shap.Explainer(classifier.predict, X_bg_trans)
+            sv = explainer(X_trans).values
 
-    except Exception:
+        # Ensure sv is 2D
+        if len(sv.shape) > 1:
+            sv_single = sv[0]
+        else:
+            sv_single = sv
+
+        # Plot summary
+        summary_path = os.path.join(reports_dir, f"shap_summary_{int(np.random.randint(1e9))}.png")
+        plt.figure(figsize=(8, 4))
+        shap.summary_plot(sv, features=X_trans, feature_names=feature_names_out, show=False)
+        plt.tight_layout()
+        plt.savefig(summary_path, dpi=150, bbox_inches="tight")
+        plt.close()
+
+        # Plot importance bar
+        importance_path = os.path.join(reports_dir, f"shap_importance_{int(np.random.randint(1e9))}.png")
+        plt.figure(figsize=(8, 4))
+        shap.summary_plot(sv, features=X_trans, feature_names=feature_names_out, plot_type="bar", show=False)
+        plt.tight_layout()
+        plt.savefig(importance_path, dpi=150, bbox_inches="tight")
+        plt.close()
+
+        shap_artifacts["shap_summary_path"] = summary_path
+        shap_artifacts["shap_importance_path"] = importance_path
+
+        # Get top features contributing to decision
+        abs_vals = np.abs(sv_single)
+        top_idx = np.argsort(-abs_vals)[:6]
+
+        for i in top_idx:
+            val = float(sv_single[i])
+            feature_importance.append(
+                {
+                    "feature": feature_names_out[i],
+                    "shap_value": val,
+                    "direction": "increases approval" if val > 0 else "decreases approval",
+                }
+            )
+    except Exception as e:
+        # Fallback gracefully so predictions never fail due to SHAP compilation
+        print(f"SHAP explanation failed: {e}")
         shap_artifacts["shap_summary_path"] = None
         shap_artifacts["shap_importance_path"] = None
-        feature_importance = []
 
     return {
         "approval_probability": float(proba),
@@ -160,4 +171,3 @@ def predict_one_with_shap(applicant: dict):
         **shap_artifacts,
         "shap_feature_importance": feature_importance,
     }
-
